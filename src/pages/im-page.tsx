@@ -30,19 +30,21 @@ function pickHighlightMessages(items: MessageItem[]) {
 
 function HighlightCard({
   item,
+  icemanAvatar,
   icemanName,
 }: {
   item: SummaryHighlight;
+  icemanAvatar: string;
   icemanName: string;
 }) {
   const navigate = useNavigate();
   const { data: conversation } = useQuery({
-    queryKey: ['conversation', item.session_id],
-    queryFn: () => getConversation(item.session_id),
+    queryKey: ['conversation', item.session_id, 'owner'],
+    queryFn: () => getConversation(item.session_id, 'owner'),
   });
   const { data: messages = [] } = useQuery({
-    queryKey: ['messages', item.session_id],
-    queryFn: () => getMessages(item.session_id),
+    queryKey: ['messages', item.session_id, 'owner'],
+    queryFn: () => getMessages(item.session_id, 'owner'),
   });
 
   if (!conversation) {
@@ -61,7 +63,7 @@ function HighlightCard({
       <div className="im-highlight-card__inner">
         {icemanMessage ? (
           <div className="im-highlight-bubble is-left">
-            <img src={getIcemanAvatar()} alt={icemanName} className="im-highlight-bubble__avatar" />
+            <img src={icemanAvatar} alt={icemanName} className="im-highlight-bubble__avatar" />
             <div className="im-highlight-bubble__content">{icemanMessage.content}</div>
           </div>
         ) : null}
@@ -92,6 +94,8 @@ export function ImPage() {
   });
 
   const todaySummary = summaries[0];
+  const icemanAvatar = getIcemanAvatar(config?.avatarUrl);
+  const icemanName = config?.nickname ?? '小冰人';
 
   return (
     <div className="mobile-page mobile-page--chat im-page">
@@ -100,8 +104,8 @@ export function ImPage() {
           <LeftOutlined />
         </button>
         <div className="chat-topbar__title">
-          <img src={getIcemanAvatar()} alt={config?.nickname ?? '小冰人'} className="chat-topbar__avatar" />
-          <span>{config?.nickname}</span>
+          <img src={icemanAvatar} alt={icemanName} className="chat-topbar__avatar" />
+          <span>{icemanName}</span>
         </div>
         <button type="button" className="icon-circle" onClick={() => navigate('/records')}>
           <Badge count={todaySummary?.visitor_count ?? 0} size="small">
@@ -117,11 +121,11 @@ export function ImPage() {
           todaySummary.visitor_highlights.slice(0, 1).map((item) => (
             <div key={item.session_id} className="im-page__row">
               <img
-                src={getIcemanAvatar()}
-                alt={config?.nickname ?? '小冰人'}
+                src={icemanAvatar}
+                alt={icemanName}
                 className="im-page__side-avatar"
               />
-              <HighlightCard item={item} icemanName={config?.nickname ?? '小冰人'} />
+              <HighlightCard item={item} icemanAvatar={icemanAvatar} icemanName={icemanName} />
             </div>
           ))
         ) : (
@@ -137,7 +141,7 @@ export function ImPage() {
         </button>
         <input className="im-page__fake-input" value="发送消息" readOnly />
         <button type="button" className="icon-circle icon-circle--soft">
-          ⌁
+          🙂
         </button>
         <button type="button" className="icon-circle icon-circle--soft">
           +

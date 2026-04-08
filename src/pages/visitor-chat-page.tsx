@@ -4,41 +4,61 @@ import { useNavigate } from 'react-router-dom';
 import { Empty, Input, Typography, message } from 'antd';
 import { LeftOutlined } from '@ant-design/icons';
 import {
+  createOrRestoreConversation,
   getConfig,
   getConversation,
-  getHostAvatar,
   getIcemanAvatar,
   getMe,
   getMessages,
-  getPrimaryVisitorSessionId,
   sendMessage,
 } from '../api/service';
 import { MessageBubble } from '../components/message-bubble';
+import { useAppStore } from '../stores/app-store';
 import { getErrorMessage } from '../utils/error';
 
 export function VisitorChatPage() {
   const [content, setContent] = useState('');
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const conversationId = getPrimaryVisitorSessionId();
+  const activeVisitorId = useAppStore((state) => state.activeVisitorId);
 
-  const { data: config } = useQuery({ queryKey: ['config'], queryFn: getConfig });
+  const { data: bootstrappedConversation } = useQuery({
+    queryKey: ['visitor-conversation-bootstrap', activeVisitorId],
+    queryFn: () => createOrRestoreConversation(activeVisitorId),
+  });
+  const conversationId = bootstrappedConversation?.session_id;
+
+  const { data: config } = useQuery({
+    queryKey: ['config'],
+    queryFn: getConfig,
+  });
   const { data: owner } = useQuery({
     queryKey: ['me', 'owner'],
     queryFn: () => getMe('owner'),
   });
+  const { data: visitor } = useQuery({
+    queryKey: ['me', 'visitor', activeVisitorId],
+    queryFn: () => getMe('visitor', activeVisitorId),
+  });
   const { data: conversation } = useQuery({
-    queryKey: ['conversation', conversationId],
-    queryFn: () => getConversation(conversationId),
+    queryKey: ['conversation', conversationId, 'visitor', activeVisitorId],
+    queryFn: () => getConversation(conversationId!, 'visitor', activeVisitorId),
+    enabled: Boolean(conversationId),
   });
   const { data: messages = [] } = useQuery({
-    queryKey: ['messages', conversationId],
-    queryFn: () => getMessages(conversationId),
+    queryKey: ['messages', conversationId, 'visitor', activeVisitorId],
+    queryFn: () => getMessages(conversationId!, 'visitor', activeVisitorId),
+    enabled: Boolean(conversationId),
   });
 
   const sendMutation = useMutation({
     mutationFn: (value: string) =>
-      sendMessage(conversationId, 'visitor', { content: value, content_type: 'text' }),
+      sendMessage(
+        conversationId!,
+        'visitor',
+        { content: value, content_type: 'text' },
+        activeVisitorId,
+      ),
     onSuccess: async () => {
       setContent('');
       await queryClient.invalidateQueries({ queryKey: ['messages', conversationId] });
@@ -51,13 +71,13 @@ export function VisitorChatPage() {
     },
   });
 
-  if (!conversation || !config || !owner) {
-    return <Empty description="访客会话不存在" />;
+  if (!conversation || !config || !owner || !visitor) {
+    return <Empty description="访客会话加载中" />;
   }
 
   const isTakenOver = conversation.status === 'host_takeover';
   const isBlocked = conversation.status === 'filtered_blocked';
-  const counterpartAvatar = isTakenOver ? getHostAvatar() : getIcemanAvatar();
+  const counterpartAvatar = isTakenOver ? owner.avatarUrl : getIcemanAvatar(config.avatarUrl);
 
   return (
     <div className="mobile-page mobile-page--chat">
@@ -89,9 +109,9 @@ export function VisitorChatPage() {
           <MessageBubble
             key={item.message_id}
             message={item}
-            visitorAvatar={conversation.peer_user.avatarUrl}
+            visitorAvatar={visitor.avatarUrl || conversation.peer_user.avatarUrl}
             icemanAvatar={counterpartAvatar}
-            hostAvatar={getHostAvatar()}
+            hostAvatar={owner.avatarUrl}
             variant="thread"
           />
         ))}
@@ -106,7 +126,7 @@ export function VisitorChatPage() {
           onChange={(event) => setContent(event.target.value)}
           placeholder={
             config.status === 'disabled'
-              ? '主人暂时关闭了小冰人服务'
+              ? '对方暂时关闭了小助手'
               : isBlocked
                 ? '当前会话已被屏蔽'
                 : '发送消息'
@@ -115,13 +135,14 @@ export function VisitorChatPage() {
           onPressEnter={(event) => {
             event.preventDefault();
             const next = content.trim();
+
             if (next && config.status === 'enabled' && !isBlocked) {
               sendMutation.mutate(next);
             }
           }}
         />
         <button type="button" className="icon-circle icon-circle--soft">
-          😊
+          🙂
         </button>
         <button type="button" className="icon-circle icon-circle--soft">
           +

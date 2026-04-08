@@ -43,9 +43,11 @@ export type IcemanConfig = {
   iceman_id: string;
   owner_user_id: string;
   nickname: string;
+  avatarUrl?: string;
   status: 'init' | 'enabled' | 'disabled';
   persona_template_id: string;
   persona_name: string;
+  opening_msg?: string;
 };
 
 export type MessageItem = {

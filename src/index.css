@@ -47,6 +47,16 @@ textarea {
   margin: 0 auto 16px;
 }
 
+.studio-toolbar__right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.visitor-switch {
+  min-width: 220px;
+}
+
 .brand-title,
 .brand-title.ant-typography {
   margin: 0;

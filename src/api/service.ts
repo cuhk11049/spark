@@ -1,26 +1,15 @@
-import {
-  blacklist,
-  configState,
-  conversations,
-  icemanProfile,
-  messages,
-  OWNER_IM_SESSION_ID,
-  ownerProfile,
-  personaTemplates,
-  potentialConnections,
-  PRIMARY_VISITOR_SESSION_ID,
-  summaryCards,
-  visitorProfile,
-} from './mock-db';
+import { requestApi } from './client';
 import type {
   ConversationItem,
+  ConversationStatus,
   DemoRole,
+  Gender,
   IcemanConfig,
-  IntentType,
   MessageItem,
-  PotentialConnection,
   PersonaTemplate,
+  SenderType,
   SummaryCard,
+  SummaryHighlight,
   UserProfile,
 } from '../types/models';
 
@@ -35,540 +24,512 @@ type SendMessagePayload = {
   content_type: 'text';
 };
 
-function wait(ms = 240) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+type SendMessageResult = {
+  message_id: string;
+  timestamp: number;
+  ai_reply: MessageItem | null;
+  session_status: ConversationStatus;
+};
+
+type TakeoverResult = {
+  session_id: string;
+  takeover_at: number;
+  status: ConversationStatus;
+  system_message: string;
+};
+
+const DEFAULT_TIMESTAMP = Math.floor(new Date('2026-04-07T00:00:00Z').getTime() / 1000);
+
+export const OWNER_USER_ID = 'owner_user_123';
+export const DEFAULT_VISITOR_USER_ID = 'visitor_user_456';
+export const DEMO_VISITOR_IDS = [
+  'visitor_user_456',
+  'visitor_user_789',
+  'visitor_user_202',
+  'visitor_user_303',
+  'visitor_user_101',
+] as const;
+export const DEFAULT_ICEMAN_AVATAR = '/ice_bb.png';
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
-function getConversationById(id: string) {
-  const conversation = conversations.find((item) => item.session_id === id);
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
 
-  if (!conversation) {
-    throw { code: 40401, message: 'conversation not found' };
+function pickString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+
+      if (trimmed) {
+        return trimmed;
+      }
+    }
   }
 
-  return conversation;
+  return '';
 }
 
-function getOwnerConversation() {
-  return getConversationById(OWNER_IM_SESSION_ID);
-}
+function pickNumber(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
 
-function getCurrentTemplate() {
-  return (
-    personaTemplates.find((item) => item.template_id === configState.persona_template_id) ??
-    personaTemplates[0]
-  );
-}
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
 
-function syncConfigDerivedFields() {
-  configState.persona_name = getCurrentTemplate().name;
-}
-
-let messageSeed = 10000;
-
-function nextMessageId() {
-  messageSeed += 1;
-  return `msg_${messageSeed}`;
-}
-
-function createMessage(
-  senderType: MessageItem['sender_type'],
-  senderId: string,
-  senderName: string,
-  content: string,
-  timestamp = Math.floor(Date.now() / 1000),
-): MessageItem {
-  return {
-    message_id: nextMessageId(),
-    sender_type: senderType,
-    sender_id: senderId,
-    sender_name: senderName,
-    content,
-    content_type: 'text',
-    timestamp,
-  };
-}
-
-function pushMessage(sessionId: string, message: MessageItem) {
-  messages[sessionId] = [...(messages[sessionId] ?? []), message];
-}
-
-function updateSessionPreview(session: ConversationItem, content: string, timestamp: number) {
-  session.last_message = {
-    content_brief: content,
-    timestamp,
-  };
-  session.last_message_at = timestamp;
-}
-
-function appendOwnerInboxNotice(content: string) {
-  const ownerConversation = getOwnerConversation();
-  const message = createMessage(
-    'IceMan',
-    configState.iceman_id,
-    configState.nickname,
-    content,
-  );
-  pushMessage(ownerConversation.session_id, message);
-  ownerConversation.unread_count += 1;
-  updateSessionPreview(ownerConversation, content, message.timestamp);
-}
-
-function ensureEnabledBootstrap() {
-  if (!messages[OWNER_IM_SESSION_ID]?.length) {
-    const bootstrap = createMessage(
-      'IceMan',
-      configState.iceman_id,
-      configState.nickname,
-      '主人，我已经恢复在线啦，随时可以帮你接住新的访客对话。',
-    );
-    messages[OWNER_IM_SESSION_ID] = [bootstrap];
-    updateSessionPreview(getOwnerConversation(), bootstrap.content, bootstrap.timestamp);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
   }
+
+  return 0;
 }
 
-function classifyMessage(content: string): IntentType {
-  const lowered = content.toLowerCase();
+function pickBoolean(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === 'boolean') {
+      return value;
+    }
+  }
+
+  return false;
+}
+
+function pickStringArray(...values: unknown[]) {
+  for (const value of values) {
+    if (Array.isArray(value)) {
+      return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+    }
+  }
+
+  return [] as string[];
+}
+
+function extractList(payload: unknown, keys: string[]) {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  const raw = asRecord(payload);
+
+  for (const key of keys) {
+    if (Array.isArray(raw[key])) {
+      return raw[key] as unknown[];
+    }
+  }
+
+  return [];
+}
+
+function normalizeGender(value: unknown): Gender {
+  const gender = pickNumber(value);
+
+  if (gender === 1 || gender === 2) {
+    return gender;
+  }
+
+  return 0;
+}
+
+function normalizeSenderType(value: unknown): SenderType {
+  const senderType = pickString(value);
 
   if (
-    lowered.includes('加微信') ||
-    lowered.includes('vx') ||
-    lowered.includes('联系方式') ||
-    lowered.includes('住哪') ||
-    lowered.includes('具体行程') ||
-    lowered.includes('兼职') ||
-    lowered.includes('推广') ||
-    lowered.includes('福利群')
+    senderType === 'Visitor' ||
+    senderType === 'IceMan' ||
+    senderType === 'Host' ||
+    senderType === 'System'
   ) {
-    return 'PRIVACY_SENSITIVE';
+    return senderType;
   }
+
+  return 'System';
+}
+
+function normalizeConversationStatus(value: unknown): ConversationStatus {
+  const status = pickString(value);
 
   if (
-    lowered.includes('美女') ||
-    lowered.includes('女朋友') ||
-    lowered.includes('约吗') ||
-    lowered.includes('宝贝')
+    status === 'host_takeover' ||
+    status === 'ai_chatting' ||
+    status === 'filtered_folded' ||
+    status === 'filtered_blocked'
   ) {
-    return 'INAPPROPRIATE_REQUEST';
+    return status;
   }
 
-  if (content.includes('？') || content.includes('?') || lowered.includes('吗')) {
-    return 'GENERAL_INQUIRY';
-  }
-
-  return 'BENIGN_INTERACTION';
+  return 'ai_chatting';
 }
 
-function getOwnerMemoryContext() {
-  return (messages[OWNER_IM_SESSION_ID] ?? [])
-    .filter((item) => item.sender_type === 'Host')
-    .slice(-2)
-    .map((item) => item.content)
-    .join(' ');
-}
-
-function generateOwnerRepresentativeResponse(intent: IntentType) {
-  if (intent === 'PRIVACY_SENSITIVE') {
-    return '联系方式、具体行程和住址这些我先帮主人保密啦。不过如果你想聊滑雪、摄影或者最近的视频内容，我很愿意继续。';
-  }
-
-  return '这个方向我先不接啦，我们还是聊聊主人的视频和兴趣吧。如果你也喜欢滑雪、摄影或旅行，我可以继续陪你聊。';
-}
-
-function generateOwnerReply(content: string) {
-  const trimmed = content.trim();
-
-  if (!trimmed) {
-    return '我在呢，想让我继续优化哪一段回复风格？';
-  }
-
-  if (trimmed.includes('总结')) {
-    return '我可以继续按“访客数 + 共同兴趣点 + 2 位高价值访客”的结构给你生成每日总结。';
-  }
-
-  if (trimmed.includes('阿勒泰') || trimmed.includes('滑雪')) {
-    return '记住啦，后面遇到聊阿勒泰和滑雪路线的人，我会主动把话题往攻略、雪感和拍照点上带。';
-  }
-
-  return `收到，我会参考你刚刚这句偏好继续调回复风格，当前人设是「${configState.persona_name}」。`;
-}
-
-function generateVisitorReply(session: ConversationItem, content: string) {
-  const template = getCurrentTemplate();
-  const leadTag = session.visitor_interest_tags[0] ?? ownerProfile.interests?.[0] ?? '视频作品';
-  const ownerMemory = getOwnerMemoryContext();
-
-  if (template.template_id === 'persona_002') {
-    return `我能感觉到你是真的懂${leadTag}的人。主人最近也一直在留意这类内容，尤其在意聊天不要太端着，要像朋友一样自然一点。${
-      ownerMemory ? '她刚刚还特地提醒我别暴露具体行程。' : ''
-    }如果你愿意，我可以继续帮你把这条线索接下去。`;
-  }
-
-  if (template.template_id === 'persona_003') {
-    return `收到。主人最近确实在关注${leadTag}，也更愿意和有具体经验的人聊天。你如果有一条最推荐的建议，直接告诉我就行，我会帮你准确转达。`;
-  }
-
-  return `这题她会很有兴趣！主人最近正好在看${leadTag}相关内容，而且刚提醒我聊天要自然、别端着。你要是愿意，可以继续说说${content.includes('阿勒泰') ? '阿勒泰路线' : '你最推荐的经验'}，我会认真帮你接住。`;
-}
-
-function cloneConversation(conversation: ConversationItem) {
+function buildFallbackUser(overrides: Partial<UserProfile> = {}): UserProfile {
   return {
-    ...conversation,
-    last_message: { ...conversation.last_message },
-    visitor_interest_tags: [...conversation.visitor_interest_tags],
+    open_id: overrides.open_id ?? '',
+    nickName: overrides.nickName ?? '未命名用户',
+    avatarUrl: overrides.avatarUrl ?? '',
+    gender: overrides.gender ?? 0,
+    city: overrides.city ?? '',
+    province: overrides.province,
+    country: overrides.country,
+    role: overrides.role,
+    interests: overrides.interests ?? [],
+    bio: overrides.bio,
+    iceman_nickname: overrides.iceman_nickname,
   };
 }
 
-function cloneMessage(message: MessageItem) {
-  return { ...message };
+function normalizeUser(value: unknown, fallback: Partial<UserProfile> = {}): UserProfile {
+  const raw = asRecord(value);
+
+  return {
+    open_id: pickString(raw.open_id, fallback.open_id),
+    nickName: pickString(raw.nickName, raw.nickname, fallback.nickName, '未命名用户'),
+    avatarUrl: pickString(raw.avatarUrl, raw.avatar_url, fallback.avatarUrl),
+    gender: normalizeGender(raw.gender ?? fallback.gender),
+    city: pickString(raw.city, fallback.city),
+    province: pickString(raw.province, fallback.province) || undefined,
+    country: pickString(raw.country, fallback.country) || undefined,
+    role:
+      raw.role === 'host' || raw.role === 'visitor'
+        ? raw.role
+        : fallback.role,
+    interests: pickStringArray(raw.interests, fallback.interests),
+    bio: pickString(raw.bio, fallback.bio) || undefined,
+    iceman_nickname: pickString(raw.iceman_nickname, fallback.iceman_nickname) || undefined,
+  };
 }
 
-function upsertSummary(card: SummaryCard) {
-  const index = summaryCards.findIndex((item) => item.date === card.date);
+function normalizeConfig(value: unknown): IcemanConfig {
+  const raw = asRecord(value);
+  const persona = asRecord(raw.persona);
+  const status = pickString(raw.status, raw.state);
+  const enabled = raw.enabled;
 
-  if (index >= 0) {
-    summaryCards[index] = card;
-    return;
+  return {
+    iceman_id: pickString(raw.iceman_id, raw.icemanId, 'iceman_demo'),
+    owner_user_id: pickString(raw.owner_user_id, raw.owner_id, OWNER_USER_ID),
+    nickname: pickString(raw.nickname, raw.nickName, raw.name, '小冰人'),
+    avatarUrl: pickString(raw.avatarUrl, raw.avatar_url, DEFAULT_ICEMAN_AVATAR),
+    status:
+      status === 'enabled' || status === 'disabled' || status === 'init'
+        ? status
+        : enabled === true
+          ? 'enabled'
+          : enabled === false
+            ? 'disabled'
+            : 'init',
+    persona_template_id: pickString(raw.persona_template_id, persona.template_id),
+    persona_name: pickString(raw.persona_name, persona.name, '默认人设'),
+    opening_msg: pickString(raw.opening_msg) || undefined,
+  };
+}
+
+function normalizePersonaTemplate(value: unknown): PersonaTemplate {
+  const raw = asRecord(value);
+
+  return {
+    template_id: pickString(raw.template_id),
+    name: pickString(raw.name, '未命名人设'),
+    description: pickString(raw.description),
+    example_dialogue: pickString(raw.example_dialogue, raw.exampleDialogue),
+  };
+}
+
+function normalizeMessage(value: unknown): MessageItem {
+  const raw = asRecord(value);
+
+  return {
+    message_id: pickString(raw.message_id, raw.id),
+    sender_type: normalizeSenderType(raw.sender_type),
+    sender_id: pickString(raw.sender_id),
+    sender_name: pickString(raw.sender_name, raw.senderName, raw.nickName),
+    content: pickString(raw.content),
+    content_type: pickString(raw.content_type, 'text') as 'text',
+    timestamp: pickNumber(raw.timestamp, raw.created_at, DEFAULT_TIMESTAMP),
+  };
+}
+
+function normalizeSummaryHighlight(value: unknown): SummaryHighlight {
+  const raw = asRecord(value);
+
+  return {
+    visitor_id: pickString(raw.visitor_id),
+    nickName: pickString(raw.nickName, raw.nickname, '高亮访客'),
+    tags: pickStringArray(raw.tags),
+    session_id: pickString(raw.session_id),
+    status: normalizeConversationStatus(raw.status),
+  };
+}
+
+function normalizeSummaryCard(value: unknown): SummaryCard {
+  const raw = asRecord(value);
+
+  return {
+    summary_id: pickString(raw.summary_id),
+    owner_user_id: pickString(raw.owner_user_id, OWNER_USER_ID),
+    date: pickString(raw.date),
+    visitor_count: pickNumber(raw.visitor_count),
+    content: pickString(raw.content),
+    visitor_highlights: asArray(raw.visitor_highlights).map(normalizeSummaryHighlight),
+    deeplink: pickString(raw.deeplink),
+    generated_at: pickNumber(raw.generated_at, DEFAULT_TIMESTAMP),
+    pushed_at: pickNumber(raw.pushed_at) || undefined,
+  };
+}
+
+function normalizeConversation(value: unknown): ConversationItem {
+  const raw = asRecord(value);
+  const lastMessageRaw = asRecord(raw.last_message);
+  const peerUserRaw =
+    raw.peer_user ??
+    raw.visitor ??
+    raw.visitor_user ??
+    raw.visitor_profile ??
+    raw.visitor_info;
+
+  const status = normalizeConversationStatus(raw.status);
+  const createdAt = pickNumber(raw.created_at, DEFAULT_TIMESTAMP);
+  const lastMessageAt = pickNumber(
+    raw.last_message_at,
+    lastMessageRaw.timestamp,
+    createdAt,
+  );
+
+  return {
+    session_id: pickString(raw.session_id, raw.id),
+    conversation_type:
+      pickString(raw.conversation_type) === 'owner_im' ? 'owner_im' : 'host_visitor',
+    peer_user: normalizeUser(peerUserRaw, buildFallbackUser({ role: 'visitor' })),
+    owner_id: pickString(raw.owner_id, OWNER_USER_ID),
+    iceman_id: pickString(raw.iceman_id, 'iceman_demo'),
+    status,
+    is_folded: pickBoolean(raw.is_folded) || status === 'filtered_folded',
+    unread_count: pickNumber(raw.unread_count),
+    last_message: {
+      content_brief: pickString(lastMessageRaw.content_brief, lastMessageRaw.content),
+      timestamp: lastMessageAt,
+    },
+    visitor_interest_tags: pickStringArray(raw.visitor_interest_tags, raw.tags, raw.interest_tags),
+    filter_reason: pickString(raw.filter_reason),
+    created_at: createdAt,
+    last_message_at: lastMessageAt,
+    takeover_at: pickNumber(raw.takeover_at) || null,
+    is_owner_session: pickBoolean(raw.is_owner_session) || pickString(raw.conversation_type) === 'owner_im',
+  };
+}
+
+function sortConversations(items: ConversationItem[]) {
+  const rank: Record<ConversationStatus, number> = {
+    host_takeover: 0,
+    ai_chatting: 1,
+    filtered_folded: 2,
+    filtered_blocked: 3,
+  };
+
+  return [...items].sort((left, right) => {
+    if (rank[left.status] !== rank[right.status]) {
+      return rank[left.status] - rank[right.status];
+    }
+
+    return right.last_message_at - left.last_message_at;
+  });
+}
+
+function resolveUserId(role: DemoRole, visitorUserId = DEFAULT_VISITOR_USER_ID) {
+  return role === 'owner' ? OWNER_USER_ID : visitorUserId;
+}
+
+function getConversationBootstrapPayload(payload: unknown) {
+  const raw = asRecord(payload);
+  const conversation = raw.conversation;
+
+  if (conversation && typeof conversation === 'object') {
+    return {
+      ...asRecord(conversation),
+      session_id: pickString(asRecord(conversation).session_id, raw.session_id),
+      opening_msg: pickString(raw.opening_msg, asRecord(conversation).opening_msg) || undefined,
+    };
   }
 
-  summaryCards.unshift(card);
+  return raw;
 }
 
-export async function getMe(role: DemoRole): Promise<UserProfile> {
-  await wait();
-  return role === 'owner' ? ownerProfile : visitorProfile;
+export function getIcemanAvatar(avatarUrl?: string | null) {
+  return avatarUrl || DEFAULT_ICEMAN_AVATAR;
+}
+
+export async function getMe(role: DemoRole, visitorUserId = DEFAULT_VISITOR_USER_ID): Promise<UserProfile> {
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: '/me',
+    userId: resolveUserId(role, visitorUserId),
+  });
+
+  return normalizeUser(
+    data,
+    buildFallbackUser({
+      open_id: resolveUserId(role, visitorUserId),
+      role: role === 'owner' ? 'host' : 'visitor',
+    }),
+  );
 }
 
 export async function getConfig(): Promise<IcemanConfig> {
-  await wait();
-  syncConfigDerivedFields();
-  return { ...configState };
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: '/config',
+    userId: OWNER_USER_ID,
+  });
+
+  return normalizeConfig(data);
 }
 
 export async function updateConfig(payload: UpdateConfigPayload): Promise<IcemanConfig> {
-  await wait();
-  syncConfigDerivedFields();
+  const data = await requestApi<unknown>({
+    method: 'PUT',
+    url: '/config',
+    data: payload,
+    userId: OWNER_USER_ID,
+  });
 
-  if (payload.action === 'enable') {
-    configState.status = 'enabled';
-    ensureEnabledBootstrap();
-    appendOwnerInboxNotice('我已经重新上线啦，会继续按照你最近的偏好和视频内容帮你接待访客。');
-  }
-
-  if (payload.action === 'disable') {
-    configState.status = 'disabled';
-  }
-
-  if (payload.action === 'update') {
-    if (payload.nickname) {
-      configState.nickname = payload.nickname;
-      appendOwnerInboxNotice(`收到，之后我会以「${configState.nickname}」的身份继续回复访客。`);
-    }
-
-    if (payload.persona_template_id) {
-      configState.persona_template_id = payload.persona_template_id;
-      syncConfigDerivedFields();
-      appendOwnerInboxNotice(`人设已切换为「${configState.persona_name}」，后续回复语气会同步调整。`);
-    }
-  }
-
-  syncConfigDerivedFields();
-  return { ...configState };
+  return normalizeConfig(data);
 }
 
 export async function getPersonaTemplates(): Promise<PersonaTemplate[]> {
-  await wait();
-  return [...personaTemplates];
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: '/persona-templates',
+    userId: OWNER_USER_ID,
+  });
+
+  return extractList(data, ['templates', 'persona_templates', 'items']).map(normalizePersonaTemplate);
 }
 
 export async function getBlacklist(): Promise<UserProfile[]> {
-  await wait();
-  return [...blacklist];
+  return [];
 }
 
-export async function getOwnerConversationEntry(): Promise<ConversationItem | null> {
-  await wait();
+export async function createOrRestoreConversation(
+  visitorUserId = DEFAULT_VISITOR_USER_ID,
+): Promise<ConversationItem> {
+  const data = await requestApi<unknown>({
+    method: 'POST',
+    url: '/conversations',
+    data: {
+      visitor_id: visitorUserId,
+    },
+    userId: visitorUserId,
+  });
 
-  if (configState.status === 'disabled') {
-    return null;
-  }
-
-  return cloneConversation(getOwnerConversation());
+  return normalizeConversation(getConversationBootstrapPayload(data));
 }
 
 export async function getVisitorConversations(showFolded = false): Promise<ConversationItem[]> {
-  await wait();
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: '/conversations',
+    params: {
+      show_folded: showFolded,
+    },
+    userId: OWNER_USER_ID,
+  });
 
-  return conversations
-    .filter((item) => !item.is_owner_session)
-    .filter((item) => item.status !== 'filtered_blocked')
-    .filter((item) => showFolded || item.status !== 'filtered_folded')
-    .sort((a, b) => {
-      const rank: Record<ConversationItem['status'], number> = {
-        host_takeover: 0,
-        ai_chatting: 1,
-        filtered_folded: 2,
-        filtered_blocked: 3,
-      };
+  const items = extractList(data, ['conversations', 'items']).map(normalizeConversation);
 
-      if (rank[a.status] !== rank[b.status]) {
-        return rank[a.status] - rank[b.status];
-      }
-
-      return b.last_message_at - a.last_message_at;
-    })
-    .map(cloneConversation);
+  return sortConversations(
+    items.filter((item) => item.status !== 'filtered_blocked'),
+  );
 }
 
-export async function getConversation(id: string): Promise<ConversationItem> {
-  await wait();
-  return cloneConversation(getConversationById(id));
+export async function getConversation(
+  id: string,
+  role: DemoRole = 'owner',
+  visitorUserId = DEFAULT_VISITOR_USER_ID,
+): Promise<ConversationItem> {
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: `/conversations/${id}`,
+    userId: resolveUserId(role, visitorUserId),
+  });
+
+  return normalizeConversation(data);
 }
 
-export async function getMessages(id: string): Promise<MessageItem[]> {
-  await wait();
-  getConversationById(id);
-  return [...(messages[id] ?? [])].map(cloneMessage);
+export async function getMessages(
+  id: string,
+  role: DemoRole = 'owner',
+  visitorUserId = DEFAULT_VISITOR_USER_ID,
+): Promise<MessageItem[]> {
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: `/conversations/${id}/messages`,
+    userId: resolveUserId(role, visitorUserId),
+  });
+
+  return extractList(data, ['messages', 'items']).map(normalizeMessage);
 }
 
 export async function sendMessage(
   id: string,
   role: DemoRole,
   payload: SendMessagePayload,
-): Promise<{
-  message_id: string;
-  timestamp: number;
-  intent: IntentType;
-  ai_reply: MessageItem | null;
-  session_status: ConversationItem['status'];
-}> {
-  await wait(180);
-
-  const conversation = getConversationById(id);
-
-  if (configState.status === 'disabled' && role === 'visitor') {
-    throw { code: 40303, message: 'iceman disabled' };
-  }
-
-  const createdAt = Math.floor(Date.now() / 1000);
-  const message = createMessage(
-    role === 'owner' ? 'Host' : 'Visitor',
-    role === 'owner' ? ownerProfile.open_id : conversation.peer_user.open_id,
-    role === 'owner' ? ownerProfile.nickName : conversation.peer_user.nickName,
-    payload.content,
-    createdAt,
-  );
-
-  pushMessage(id, message);
-  updateSessionPreview(conversation, payload.content, createdAt);
-
-  if (role === 'owner') {
-    if (conversation.is_owner_session) {
-      const aiReply = createMessage(
-        'IceMan',
-        configState.iceman_id,
-        configState.nickname,
-        generateOwnerReply(payload.content),
-        createdAt + 1,
-      );
-      pushMessage(id, aiReply);
-      updateSessionPreview(conversation, aiReply.content, aiReply.timestamp);
-      conversation.unread_count += 1;
-
-      return {
-        message_id: message.message_id,
-        timestamp: message.timestamp,
-        intent: 'GENERAL_INQUIRY',
-        ai_reply: cloneMessage(aiReply),
-        session_status: conversation.status,
-      };
-    }
-
-    return {
-      message_id: message.message_id,
-      timestamp: message.timestamp,
-      intent: 'GENERAL_INQUIRY',
-      ai_reply: null,
-      session_status: conversation.status,
-    };
-  }
-
-  if (conversation.status === 'filtered_blocked') {
-    throw { code: 40301, message: 'cannot send to blocked conversation' };
-  }
-
-  if (conversation.status === 'host_takeover') {
-    return {
-      message_id: message.message_id,
-      timestamp: message.timestamp,
-      intent: 'BENIGN_INTERACTION',
-      ai_reply: null,
-      session_status: conversation.status,
-    };
-  }
-
-  const intent = classifyMessage(payload.content);
-
-  if (intent === 'INAPPROPRIATE_REQUEST' || intent === 'PRIVACY_SENSITIVE') {
-    const reply = createMessage(
-      'IceMan',
-      configState.iceman_id,
-      configState.nickname,
-      generateOwnerRepresentativeResponse(intent),
-      createdAt + 1,
-    );
-    pushMessage(id, reply);
-    conversation.status = 'filtered_folded';
-    conversation.is_folded = true;
-    conversation.filter_reason =
-      intent === 'PRIVACY_SENSITIVE' ? '隐私/导流相关问题已折叠处理。' : '不当请求已折叠处理。';
-    updateSessionPreview(conversation, reply.content, reply.timestamp);
-
-    return {
-      message_id: message.message_id,
-      timestamp: message.timestamp,
-      intent,
-      ai_reply: cloneMessage(reply),
-      session_status: conversation.status,
-    };
-  }
-
-  const aiReply = createMessage(
-    'IceMan',
-    configState.iceman_id,
-    configState.nickname,
-    generateVisitorReply(conversation, payload.content),
-    createdAt + 1,
-  );
-  pushMessage(id, aiReply);
-  conversation.status = 'ai_chatting';
-  conversation.is_folded = false;
-  conversation.filter_reason = '';
-  updateSessionPreview(conversation, aiReply.content, aiReply.timestamp);
+  visitorUserId = DEFAULT_VISITOR_USER_ID,
+): Promise<SendMessageResult> {
+  const data = await requestApi<unknown>({
+    method: 'POST',
+    url: `/conversations/${id}/messages`,
+    data: payload,
+    userId: resolveUserId(role, visitorUserId),
+  });
+  const raw = asRecord(data);
 
   return {
-    message_id: message.message_id,
-    timestamp: message.timestamp,
-    intent,
-    ai_reply: cloneMessage(aiReply),
-    session_status: conversation.status,
+    message_id: pickString(raw.message_id, raw.id),
+    timestamp: pickNumber(raw.timestamp, DEFAULT_TIMESTAMP),
+    ai_reply: raw.ai_reply ? normalizeMessage(raw.ai_reply) : null,
+    session_status: normalizeConversationStatus(raw.session_status),
   };
 }
 
-export async function takeoverConversation(id: string) {
-  await wait();
-  const conversation = getConversationById(id);
-
-  if (conversation.status === 'filtered_blocked') {
-    throw { code: 40301, message: 'cannot takeover blocked conversation' };
-  }
-
-  if (conversation.status === 'host_takeover') {
-    throw { code: 40302, message: 'already takeover' };
-  }
-
-  conversation.status = 'host_takeover';
-  conversation.is_folded = false;
-  conversation.takeover_at = Math.floor(Date.now() / 1000);
-  const systemMessage = '主人觉得你很有趣，决定亲自和你聊聊～';
-
-  pushMessage(
-    id,
-    createMessage(
-      'System',
-      configState.iceman_id,
-      'System',
-      systemMessage,
-      conversation.takeover_at,
-    ),
-  );
-  updateSessionPreview(conversation, systemMessage, conversation.takeover_at);
+export async function takeoverConversation(id: string): Promise<TakeoverResult> {
+  const data = await requestApi<unknown>({
+    method: 'POST',
+    url: `/conversations/${id}/takeover`,
+    userId: OWNER_USER_ID,
+  });
+  const raw = asRecord(data);
 
   return {
-    session_id: id,
-    takeover_at: conversation.takeover_at,
-    status: conversation.status,
-    system_message: systemMessage,
+    session_id: pickString(raw.session_id, id),
+    takeover_at: pickNumber(raw.takeover_at, DEFAULT_TIMESTAMP),
+    status: normalizeConversationStatus(raw.status),
+    system_message: pickString(raw.system_message),
   };
 }
 
 export async function getSummaries(date?: string): Promise<SummaryCard[]> {
-  await wait();
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: '/summaries',
+    params: date ? { date } : undefined,
+    userId: OWNER_USER_ID,
+  });
 
-  if (configState.status === 'disabled') {
-    return [];
-  }
-
-  return summaryCards
-    .filter((item) => (date ? item.date === date : true))
-    .map((item) => ({
-      ...item,
-      visitor_highlights: item.visitor_highlights.map((highlight) => ({ ...highlight })),
-    }));
+  return extractList(data, ['summaries', 'items']).map(normalizeSummaryCard);
 }
 
-export async function generateSummary(date = '2026-04-05'): Promise<SummaryCard> {
-  await wait(360);
+export async function generateSummary(date?: string): Promise<SummaryCard> {
+  const data = await requestApi<unknown>({
+    method: 'POST',
+    url: '/summaries/generate',
+    data: date ? { date } : undefined,
+    userId: OWNER_USER_ID,
+  });
 
-  const visibleSessions = conversations.filter(
-    (item) =>
-      item.conversation_type === 'host_visitor' &&
-      item.status !== 'filtered_blocked' &&
-      item.session_id.includes(date.replaceAll('-', '')),
-  );
-  const highlights = visibleSessions
-    .filter((item) => item.status !== 'filtered_folded')
-    .slice(0, 3)
-    .map((item) => ({
-      visitor_id: item.peer_user.open_id,
-      nickName: item.peer_user.nickName,
-      tags: item.visitor_interest_tags.slice(0, 3),
-      session_id: item.session_id,
-      status: item.status,
-    }));
-  const highlightText = highlights
-    .slice(0, 2)
-    .map((item) => `${item.nickName} 和你都聊到了 ${item.tags.slice(0, 2).join('、')}`)
-    .join('；');
-  const generatedAt = Math.floor(Date.now() / 1000);
-  const card: SummaryCard = {
-    summary_id: `sum_${date.replaceAll('-', '')}_owner123`,
-    owner_user_id: ownerProfile.open_id,
-    date,
-    visitor_count: visibleSessions.length,
-    content: `今天共有 ${visibleSessions.length} 位访客与我对话。其中，${highlightText || '大家主要都围绕滑雪、摄影和日常兴趣展开了聊天'}。`,
-    visitor_highlights: highlights,
-    deeplink: `/iceman/conversations?date=${date}`,
-    generated_at: generatedAt,
-    pushed_at: generatedAt + 5,
-  };
-
-  upsertSummary(card);
-  appendOwnerInboxNotice(`我刚帮你刷新了 ${date} 的总结卡片，可以去 IM 页直接查看。`);
-
-  return {
-    ...card,
-    visitor_highlights: card.visitor_highlights.map((item) => ({ ...item })),
-  };
-}
-
-export async function getPotentialConnection(sessionId: string): Promise<PotentialConnection> {
-  await wait();
-
-  return potentialConnections[sessionId] ?? {
-    is_potential: false,
-    reason: '当前还没有足够的高质量信号。',
-  };
-}
-
-export function getIcemanAvatar() {
-  return icemanProfile.avatarUrl;
-}
-
-export function getHostAvatar() {
-  return ownerProfile.avatarUrl;
-}
-
-export function getPrimaryVisitorSessionId() {
-  return PRIMARY_VISITOR_SESSION_ID;
+  return normalizeSummaryCard(data);
 }
