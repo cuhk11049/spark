@@ -12,6 +12,7 @@ import {
   sendHostDialogueMessage,
 } from '../api/service';
 import { MessageBubble } from '../components/message-bubble';
+import type { MessageItem } from '../types/models';
 import { getErrorMessage } from '../utils/error';
 
 export function ImPage() {
@@ -35,13 +36,37 @@ export function ImPage() {
     queryKey: ['host-dialogue', 'messages'],
     queryFn: () => getHostDialogueMessages(),
   });
+  const messagesQueryKey = ['host-dialogue', 'messages'] as const;
 
   const sendMutation = useMutation({
     mutationFn: (value: string) =>
       sendHostDialogueMessage({ content: value, content_type: 'text' }),
-    onSuccess: async () => {
+    onSuccess: async (result, sentContent) => {
+      const nextMessages: MessageItem[] = [
+        {
+          message_id: result.message_id,
+          sender_type: 'Host',
+          sender_id: owner?.open_id ?? 'owner_user_123',
+          sender_name: owner?.nickName ?? '主人',
+          content: sentContent,
+          content_type: 'text',
+          timestamp: result.timestamp,
+        },
+      ];
+
+      if (result.ai_reply) {
+        nextMessages.push(result.ai_reply);
+      }
+
+      queryClient.setQueryData<MessageItem[]>(messagesQueryKey, (current = []) => {
+        const knownIds = new Set(current.map((item) => item.message_id));
+        const appended = nextMessages.filter((item) => !knownIds.has(item.message_id));
+
+        return appended.length ? [...current, ...appended] : current;
+      });
+
       setContent('');
-      await queryClient.invalidateQueries({ queryKey: ['host-dialogue', 'messages'] });
+      await queryClient.invalidateQueries({ queryKey: messagesQueryKey });
       await queryClient.invalidateQueries({ queryKey: ['summaries'] });
     },
     onError: (error: { code?: number; message?: string }) => {
