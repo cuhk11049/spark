@@ -31,6 +31,12 @@ type SendMessageResult = {
   session_status: ConversationStatus;
 };
 
+type HostDialogueSendResult = {
+  message_id: string;
+  timestamp: number;
+  ai_reply: MessageItem | null;
+};
+
 type TakeoverResult = {
   session_id: string;
   takeover_at: number;
@@ -472,6 +478,35 @@ export async function getMessages(
   });
 
   return extractList(data, ['messages', 'items']).map(normalizeMessage);
+}
+
+export async function getHostDialogueMessages(limit = 50): Promise<MessageItem[]> {
+  const data = await requestApi<unknown>({
+    method: 'GET',
+    url: '/host-dialogue',
+    params: { limit },
+    userId: OWNER_USER_ID,
+  });
+
+  return extractList(data, ['messages', 'items']).map(normalizeMessage);
+}
+
+export async function sendHostDialogueMessage(
+  payload: SendMessagePayload,
+): Promise<HostDialogueSendResult> {
+  const data = await requestApi<unknown>({
+    method: 'POST',
+    url: '/host-dialogue',
+    data: payload,
+    userId: OWNER_USER_ID,
+  });
+  const raw = asRecord(data);
+
+  return {
+    message_id: pickString(raw.message_id, raw.id),
+    timestamp: pickNumber(raw.timestamp, DEFAULT_TIMESTAMP),
+    ai_reply: raw.ai_reply ? normalizeMessage(raw.ai_reply) : null,
+  };
 }
 
 export async function sendMessage(
