@@ -19,7 +19,7 @@ function resolveBaseUrl() {
 
 export const apiClient = axios.create({
   baseURL: resolveBaseUrl(),
-  timeout: 8000,
+  timeout: 60000,
 });
 
 type RequestOptions = AxiosRequestConfig & {
