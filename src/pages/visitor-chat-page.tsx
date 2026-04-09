@@ -14,6 +14,7 @@ import {
 } from '../api/service';
 import { MessageBubble } from '../components/message-bubble';
 import { useAppStore } from '../stores/app-store';
+import type { MessageItem } from '../types/models';
 import { getErrorMessage } from '../utils/error';
 
 export function VisitorChatPage() {
@@ -50,6 +51,8 @@ export function VisitorChatPage() {
     queryFn: () => getMessages(conversationId!, 'visitor', activeVisitorId),
     enabled: Boolean(conversationId),
   });
+  const messagesQueryKey = ['messages', conversationId, 'visitor', activeVisitorId] as const;
+  const conversationQueryKey = ['conversation', conversationId, 'visitor', activeVisitorId] as const;
 
   const sendMutation = useMutation({
     mutationFn: (value: string) =>
@@ -59,10 +62,33 @@ export function VisitorChatPage() {
         { content: value, content_type: 'text' },
         activeVisitorId,
       ),
-    onSuccess: async () => {
+    onSuccess: async (result, sentContent) => {
+      const nextMessages: MessageItem[] = [
+        {
+          message_id: result.message_id,
+          sender_type: 'Visitor',
+          sender_id: visitor?.open_id ?? activeVisitorId,
+          sender_name: visitor?.nickName ?? '访客',
+          content: sentContent,
+          content_type: 'text',
+          timestamp: result.timestamp,
+        },
+      ];
+
+      if (result.ai_reply) {
+        nextMessages.push(result.ai_reply);
+      }
+
+      queryClient.setQueryData<MessageItem[]>(messagesQueryKey, (current = []) => {
+        const knownIds = new Set(current.map((item) => item.message_id));
+        const appended = nextMessages.filter((item) => !knownIds.has(item.message_id));
+
+        return appended.length ? [...current, ...appended] : current;
+      });
+
       setContent('');
-      await queryClient.invalidateQueries({ queryKey: ['messages', conversationId] });
-      await queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] });
+      await queryClient.invalidateQueries({ queryKey: messagesQueryKey });
+      await queryClient.invalidateQueries({ queryKey: conversationQueryKey });
       await queryClient.invalidateQueries({ queryKey: ['visitor-conversations'] });
       await queryClient.invalidateQueries({ queryKey: ['summaries'] });
     },
