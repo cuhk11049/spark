@@ -1,6 +1,7 @@
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
-import { Badge, Empty } from 'antd';
+import { Badge, Empty, Input, message } from 'antd';
 import { LeftOutlined, OrderedListOutlined } from '@ant-design/icons';
 import {
   getConfig,
@@ -8,8 +9,11 @@ import {
   getIcemanAvatar,
   getMessages,
   getSummaries,
+  getVisitorConversations,
+  sendMessage,
 } from '../api/service';
 import type { MessageItem, SummaryHighlight } from '../types/models';
+import { getErrorMessage } from '../utils/error';
 
 function pickHighlightMessages(items: MessageItem[]) {
   const visitorIndex = [...items]
@@ -83,7 +87,10 @@ function HighlightCard({
 }
 
 export function ImPage() {
+  const [content, setContent] = useState('');
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
   const { data: config } = useQuery({
     queryKey: ['config'],
     queryFn: getConfig,
@@ -92,10 +99,40 @@ export function ImPage() {
     queryKey: ['summaries'],
     queryFn: () => getSummaries(),
   });
+  const { data: conversations = [] } = useQuery({
+    queryKey: ['visitor-conversations', 'with-folded'],
+    queryFn: () => getVisitorConversations(true),
+  });
+
+  const ownerConversation = conversations.find(
+    (item) => item.is_owner_session || item.conversation_type === 'owner_im',
+  );
+  const ownerConversationId = ownerConversation?.session_id;
+
+  const sendMutation = useMutation({
+    mutationFn: (value: string) =>
+      sendMessage(ownerConversationId!, 'owner', { content: value, content_type: 'text' }),
+    onSuccess: async () => {
+      setContent('');
+      await queryClient.invalidateQueries({ queryKey: ['messages', ownerConversationId] });
+      await queryClient.invalidateQueries({ queryKey: ['conversation', ownerConversationId] });
+      await queryClient.invalidateQueries({ queryKey: ['visitor-conversations'] });
+      await queryClient.invalidateQueries({ queryKey: ['summaries'] });
+    },
+    onError: async (error: { code?: number; message?: string }) => {
+      if (error.code === 40401) {
+        await queryClient.invalidateQueries({ queryKey: ['visitor-conversations'] });
+      }
+
+      message.error(getErrorMessage(error.code ?? 50001, error.message ?? '发送失败'));
+    },
+  });
 
   const todaySummary = summaries[0];
   const icemanAvatar = getIcemanAvatar(config?.avatarUrl);
   const icemanName = config?.nickname ?? '小冰人';
+  const isDisabled = config?.status === 'disabled';
+  const isInputDisabled = isDisabled || !ownerConversationId || sendMutation.isPending;
 
   return (
     <div className="mobile-page mobile-page--chat im-page">
@@ -117,7 +154,7 @@ export function ImPage() {
       <div className="chat-timestamp">刚刚</div>
 
       <div className="im-page__body">
-        {todaySummary?.visitor_highlights.length ? (
+        {todaySummary?.visitor_highlights?.length ? (
           todaySummary.visitor_highlights.slice(0, 1).map((item) => (
             <div key={item.session_id} className="im-page__row">
               <img
@@ -139,7 +176,26 @@ export function ImPage() {
         <button type="button" className="icon-circle icon-circle--soft">
           <span className="grid-icon" />
         </button>
-        <input className="im-page__fake-input" value="发送消息" readOnly />
+        <Input
+          value={content}
+          onChange={(event) => setContent(event.target.value)}
+          placeholder={
+            isDisabled
+              ? '小冰人当前已关闭'
+              : !ownerConversationId
+                ? '主人 IM 会话还没有准备好'
+                : '给自己的小冰人发送消息'
+          }
+          disabled={isInputDisabled}
+          onPressEnter={(event) => {
+            event.preventDefault();
+            const next = content.trim();
+
+            if (next && ownerConversationId && !isDisabled) {
+              sendMutation.mutate(next);
+            }
+          }}
+        />
         <button type="button" className="icon-circle icon-circle--soft">
           🙂
         </button>
